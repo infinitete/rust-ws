@@ -2,6 +2,12 @@
 name = "rsws"
 version = "0.1.0"
 edition = "2024"
+description = "Production-grade, RFC 6455 compliant WebSocket library for Rust"
+license = "MIT"
+repository = "https://github.com/infinitete/rust-ws"
+keywords = ["websocket", "async", "tokio", "rfc6455", "networking"]
+categories = ["network-programming", "asynchronous", "web-programming"]
+readme = "README.md"
 
 [dependencies]
 thiserror = "1.0"
