@@ -70,7 +70,12 @@ impl<T> Connection<T> {
     /// - `role`: The connection role (Client or Server)
     /// - `config`: Connection configuration
     /// - `extensions`: Pre-configured extension registry
-    pub fn with_extensions(io: T, role: Role, config: Config, extensions: ExtensionRegistry) -> Self {
+    pub fn with_extensions(
+        io: T,
+        role: Role,
+        config: Config,
+        extensions: ExtensionRegistry,
+    ) -> Self {
         let assembler = MessageAssembler::new(config.clone());
         Self {
             codec: WebSocketCodec::new(io, role, config),
