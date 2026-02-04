@@ -21,7 +21,7 @@ A production-grade, RFC 6455 compliant WebSocket library for Rust.
 
 ```toml
 [dependencies]
-rsws = "0.1"
+rsws = "0.2"
 ```
 
 ### Feature Flags
@@ -35,13 +35,13 @@ rsws = "0.1"
 
 ```toml
 # With TLS
-rsws = { version = "0.1", features = ["tls-rustls"] }
+rsws = { version = "0.2", features = ["tls-rustls"] }
 
 # With compression
-rsws = { version = "0.1", features = ["compression"] }
+rsws = { version = "0.2", features = ["compression"] }
 
 # Full featured
-rsws = { version = "0.1", features = ["tls-rustls", "compression"] }
+rsws = { version = "0.2", features = ["tls-rustls", "compression"] }
 ```
 
 ## Quick Start
@@ -202,7 +202,9 @@ let config = Config::new()
 |--------|-------|---------|-----------|----------|
 | `Limits::default()` | 16 MB | 64 MB | 128 | General purpose |
 | `Limits::embedded()` | 64 KB | 256 KB | 16 | Resource-constrained |
-| `Limits::unrestricted()` | 1 GB | 4 GB | 1024 | Trusted environments |
+| ~~`Limits::unrestricted()`~~ | 1 GB | 4 GB | 1024 | ⚠️ **Deprecated** - Use `default()` |
+
+> **Note**: `Limits::unrestricted()` is deprecated since v0.2.0 due to security concerns (memory exhaustion attacks).
 
 ### Error Handling
 
@@ -316,6 +318,8 @@ cargo bench --bench utf8        # UTF-8 validation throughput
 - CRLF injection prevention in headers
 - Configurable size limits (DoS protection)
 - Proper masking enforcement per role
+- Cryptographically secure mask generation (v0.2.2+)
+- Decompression bomb protection with ratio limits (v0.2.2+)
 
 ### Autobahn Test Suite
 
