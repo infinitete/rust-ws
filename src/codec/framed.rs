@@ -8,27 +8,20 @@ use crate::protocol::Frame;
 use crate::protocol::validation::FrameValidator;
 
 /// Generate a random seed for mask generation.
-/// Falls back to system time if getrandom fails.
+///
+/// # Panics
+///
+/// Panics if the system's random number generator is unavailable.
+/// This is a critical security requirement - WebSocket masking MUST use
+/// cryptographically secure random values to prevent cache poisoning attacks.
 fn random_mask_seed() -> u32 {
     let mut buf = [0u8; 4];
-    if getrandom::getrandom(&mut buf).is_ok() {
-        u32::from_le_bytes(buf)
-    } else {
-        #[cold]
-        fn fallback() -> u32 {
-            eprintln!(
-                "[rsws] WARNING: getrandom failed, using time-based fallback for WebSocket mask. \
-                 This reduces mask entropy and may weaken security."
-            );
-
-            use std::time::{SystemTime, UNIX_EPOCH};
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map(|d| d.as_nanos() as u32)
-                .unwrap_or(0x12345678)
-        }
-        fallback()
-    }
+    getrandom::getrandom(&mut buf).expect(
+        "Failed to obtain random bytes for WebSocket mask. \
+         This is a critical security requirement. \
+         Ensure your system has a working random number generator.",
+    );
+    u32::from_le_bytes(buf)
 }
 
 /// WebSocket frame encoder/decoder over an async I/O stream.
@@ -103,16 +96,20 @@ impl<T: AsyncRead + AsyncWrite + Unpin> WebSocketCodec<T> {
                     126 if self.read_buf.len() >= 4 => {
                         Some(u16::from_be_bytes([self.read_buf[2], self.read_buf[3]]) as usize)
                     }
-                    127 if self.read_buf.len() >= 10 => Some(u64::from_be_bytes([
-                        self.read_buf[2],
-                        self.read_buf[3],
-                        self.read_buf[4],
-                        self.read_buf[5],
-                        self.read_buf[6],
-                        self.read_buf[7],
-                        self.read_buf[8],
-                        self.read_buf[9],
-                    ]) as usize),
+                    127 if self.read_buf.len() >= 10 => {
+                        let len_u64 = u64::from_be_bytes([
+                            self.read_buf[2],
+                            self.read_buf[3],
+                            self.read_buf[4],
+                            self.read_buf[5],
+                            self.read_buf[6],
+                            self.read_buf[7],
+                            self.read_buf[8],
+                            self.read_buf[9],
+                        ]);
+                        // Use try_from to safely convert u64 to usize, avoiding silent truncation on 32-bit platforms
+                        usize::try_from(len_u64).ok()
+                    }
                     _ => None,
                 };
 
@@ -149,6 +146,15 @@ impl<T: AsyncRead + AsyncWrite + Unpin> WebSocketCodec<T> {
             // SAFETY: `read()` guarantees it initialized exactly `n` bytes.
             // We advance by `n` to mark those bytes as part of the buffer.
             unsafe { self.read_buf.advance_mut(n) };
+
+            // Shrink buffer if it's significantly oversized to prevent memory bloat
+            if self.read_buf.capacity() > self.read_buf.len() * 4
+                && self.read_buf.capacity() > 64 * 1024
+            {
+                let remaining = self.read_buf.split();
+                self.read_buf = BytesMut::with_capacity(remaining.len().max(8192));
+                self.read_buf.extend_from_slice(&remaining);
+            }
         }
     }
 
@@ -173,10 +179,17 @@ impl<T: AsyncRead + AsyncWrite + Unpin> WebSocketCodec<T> {
 
         let wire_size = frame.wire_size(mask.is_some());
         self.write_buf.clear();
+        self.write_buf.reserve(wire_size);
         self.write_buf.resize(wire_size, 0);
 
         let written = frame.write(&mut self.write_buf, mask)?;
         self.io.write_all(&self.write_buf[..written]).await?;
+
+        // Shrink write buffer if significantly oversized
+        if self.write_buf.capacity() > 64 * 1024 && self.write_buf.capacity() > wire_size * 4 {
+            self.write_buf = BytesMut::with_capacity(8192);
+        }
+
         Ok(())
     }
 
