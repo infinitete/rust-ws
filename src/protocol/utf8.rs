@@ -4,6 +4,7 @@
 //! handling partial multi-byte sequences across fragment boundaries.
 
 use crate::error::{Error, Result};
+use crate::protocol::utf8_simd::validate_utf8_simd;
 
 /// Incremental UTF-8 validator for fragmented WebSocket messages.
 ///
@@ -105,9 +106,7 @@ impl Utf8Validator {
 ///
 /// Returns `Error::InvalidUtf8` if the data is not valid UTF-8.
 pub fn validate_utf8(data: &[u8]) -> Result<()> {
-    std::str::from_utf8(data)
-        .map(|_| ())
-        .map_err(|_| Error::InvalidUtf8)
+    validate_utf8_simd(data)
 }
 
 #[cfg(test)]
