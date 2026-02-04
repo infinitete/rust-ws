@@ -21,7 +21,7 @@
 
 ```toml
 [dependencies]
-rsws = "0.1"
+rsws = "0.2"
 ```
 
 ### 功能标志
@@ -35,13 +35,13 @@ rsws = "0.1"
 
 ```toml
 # 启用 TLS
-rsws = { version = "0.1", features = ["tls-rustls"] }
+rsws = { version = "0.2", features = ["tls-rustls"] }
 
 # 启用压缩
-rsws = { version = "0.1", features = ["compression"] }
+rsws = { version = "0.2", features = ["compression"] }
 
 # 完整功能
-rsws = { version = "0.1", features = ["tls-rustls", "compression"] }
+rsws = { version = "0.2", features = ["tls-rustls", "compression"] }
 ```
 
 ## 快速开始
@@ -202,7 +202,9 @@ let config = Config::new()
 |------|--------|----------|--------|----------|
 | `Limits::default()` | 16 MB | 64 MB | 128 | 通用 |
 | `Limits::embedded()` | 64 KB | 256 KB | 16 | 资源受限环境 |
-| `Limits::unrestricted()` | 1 GB | 4 GB | 1024 | 受信环境 |
+| ~~`Limits::unrestricted()`~~ | 1 GB | 4 GB | 1024 | ⚠️ **已废弃** - 请使用 `default()` |
+
+> **注意**: `Limits::unrestricted()` 自 v0.2.0 起已废弃，因存在安全隐患（内存耗尽攻击）。
 
 ### 错误处理
 
@@ -316,6 +318,8 @@ cargo bench --bench utf8        # UTF-8 验证吞吐量
 - 头部 CRLF 注入防护
 - 可配置大小限制（DoS 防护）
 - 按角色强制执行掩码规则
+- 加密安全的掩码生成（v0.2.2+）
+- 解压缩炸弹防护，带比率限制（v0.2.2+）
 
 ### Autobahn 测试套件
 
