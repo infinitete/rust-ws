@@ -10,6 +10,8 @@ const MAX_WINDOW_BITS: u8 = 15;
 const DEFAULT_WINDOW_BITS: u8 = 15;
 const DEFLATE_TRAILER: [u8; 4] = [0x00, 0x00, 0xff, 0xff];
 const MAX_COMPRESSION_ITERATIONS: usize = 100_000;
+const MAX_DECOMPRESSION_RATIO: usize = 100;
+const DEFAULT_MAX_DECOMPRESSED_SIZE: usize = 64 * 1024 * 1024;
 
 /// Configuration for the permessage-deflate extension.
 ///
@@ -26,6 +28,9 @@ pub struct DeflateConfig {
     pub client_max_window_bits: u8,
     /// Compression level (0-9, default 6). Higher = better compression, slower.
     pub compression_level: u32,
+    /// Maximum decompressed message size in bytes (default 64MB).
+    /// Prevents decompression bomb attacks.
+    pub max_decompressed_size: usize,
 }
 
 impl Default for DeflateConfig {
@@ -36,6 +41,7 @@ impl Default for DeflateConfig {
             server_max_window_bits: DEFAULT_WINDOW_BITS,
             client_max_window_bits: DEFAULT_WINDOW_BITS,
             compression_level: 6,
+            max_decompressed_size: DEFAULT_MAX_DECOMPRESSED_SIZE,
         }
     }
 }
@@ -149,7 +155,7 @@ impl DeflateExtension {
         Self::new(config, true)
     }
 
-    pub(crate) fn ensure_encoder(&mut self) -> &mut Compress {
+    pub(crate) fn ensure_encoder(&mut self) -> Result<&mut Compress> {
         if self.encoder.is_none() {
             let window_bits = if self.is_server {
                 self.config.server_max_window_bits
@@ -163,10 +169,12 @@ impl DeflateExtension {
                 window_bits,
             ));
         }
-        self.encoder.as_mut().unwrap()
+        self.encoder
+            .as_mut()
+            .ok_or_else(|| Error::Extension("Failed to initialize encoder".into()))
     }
 
-    pub(crate) fn ensure_decoder(&mut self) -> &mut Decompress {
+    pub(crate) fn ensure_decoder(&mut self) -> Result<&mut Decompress> {
         if self.decoder.is_none() {
             let window_bits = if self.is_server {
                 self.config.client_max_window_bits
@@ -178,7 +186,9 @@ impl DeflateExtension {
                 window_bits,
             ));
         }
-        self.decoder.as_mut().unwrap()
+        self.decoder
+            .as_mut()
+            .ok_or_else(|| Error::Extension("Failed to initialize decoder".into()))
     }
 
     fn compress(&mut self, data: &[u8]) -> Result<Vec<u8>> {
@@ -186,7 +196,7 @@ impl DeflateExtension {
             return Ok(Vec::new());
         }
 
-        let encoder = self.ensure_encoder();
+        let encoder = self.ensure_encoder()?;
         let mut compressed = Vec::with_capacity(data.len());
         let mut input_pos = 0;
         let mut iterations = 0;
@@ -253,8 +263,11 @@ impl DeflateExtension {
         let mut input = data.to_vec();
         input.extend_from_slice(&DEFLATE_TRAILER);
 
-        let decoder = self.ensure_decoder();
-        let mut decompressed = Vec::with_capacity(data.len() * 4);
+        let max_size = self.config.max_decompressed_size;
+        let max_ratio_size = data.len().saturating_mul(MAX_DECOMPRESSION_RATIO);
+
+        let decoder = self.ensure_decoder()?;
+        let mut decompressed = Vec::with_capacity(data.len().min(4096));
         let mut input_pos = 0;
         let mut iterations = 0;
 
@@ -289,6 +302,22 @@ impl DeflateExtension {
 
             decompressed.truncate(old_len + produced);
             input_pos += consumed;
+
+            if decompressed.len() > max_size {
+                return Err(Error::Extension(format!(
+                    "Decompressed size {} exceeds limit {}",
+                    decompressed.len(),
+                    max_size
+                )));
+            }
+
+            if decompressed.len() > max_ratio_size {
+                return Err(Error::Extension(format!(
+                    "Decompression ratio exceeded: {}x (max {}x)",
+                    decompressed.len() / data.len().max(1),
+                    MAX_DECOMPRESSION_RATIO
+                )));
+            }
 
             if status == flate2::Status::StreamEnd || produced == 0 {
                 break;
@@ -660,7 +689,7 @@ mod tests {
         ext.negotiated = true;
 
         // Trigger encoder creation
-        let _ = ext.ensure_encoder();
+        let _ = ext.ensure_encoder().unwrap();
         assert!(ext.encoder.is_some());
 
         let mut frame = Frame::text(b"test data for compression".to_vec());
@@ -703,8 +732,8 @@ mod tests {
         assert_eq!(ext.config.server_max_window_bits, 9);
         assert_eq!(ext.config.client_max_window_bits, 10);
 
-        let _ = ext.ensure_encoder();
-        let _ = ext.ensure_decoder();
+        let _ = ext.ensure_encoder().unwrap();
+        let _ = ext.ensure_decoder().unwrap();
 
         assert!(ext.encoder.is_some());
         assert!(ext.decoder.is_some());

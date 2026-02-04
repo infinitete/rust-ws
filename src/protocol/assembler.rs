@@ -89,7 +89,11 @@ impl MessageAssembler {
 
         if frame.fin {
             let payload = self.buffer.split().freeze().to_vec();
-            let opcode = self.opcode.take().unwrap();
+            let opcode = self.opcode.take().ok_or_else(|| {
+                Error::ProtocolViolation(
+                    "Internal error: opcode not set during message assembly".into(),
+                )
+            })?;
             self.total_size = 0;
             self.fragment_count = 0;
             self.utf8_validator = None;
@@ -107,6 +111,10 @@ impl MessageAssembler {
     /// Reset the assembler, discarding any partial message.
     pub fn reset(&mut self) {
         self.buffer.clear();
+        // Shrink buffer if significantly oversized to prevent memory bloat
+        if self.buffer.capacity() > 64 * 1024 {
+            self.buffer = BytesMut::with_capacity(8192);
+        }
         self.fragment_count = 0;
         self.opcode = None;
         self.total_size = 0;

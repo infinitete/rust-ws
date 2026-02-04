@@ -45,14 +45,16 @@ impl Utf8Validator {
     ///
     /// Returns `Error::InvalidUtf8` if the data contains invalid UTF-8 sequences.
     pub fn validate(&mut self, data: &[u8], is_final: bool) -> Result<()> {
+        use std::borrow::Cow;
+
         // Prepend any incomplete bytes from previous fragment
-        let check_data = if self.incomplete_len > 0 {
+        let check_data: Cow<[u8]> = if self.incomplete_len > 0 {
             let mut combined = Vec::with_capacity(self.incomplete_len + data.len());
             combined.extend_from_slice(&self.incomplete[..self.incomplete_len]);
             combined.extend_from_slice(data);
-            combined
+            Cow::Owned(combined)
         } else {
-            data.to_vec()
+            Cow::Borrowed(data)
         };
 
         // Reset incomplete buffer

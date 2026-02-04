@@ -77,17 +77,19 @@ impl Limits {
 
     /// Create limits for unrestricted use.
     ///
-    /// Warning: Use only in trusted environments.
+    /// # Security Warning
     ///
-    /// - Max frame: 1 GB (on 64-bit) or `usize::MAX` (on 32-bit)
-    /// - Max message: 4 GB (on 64-bit) or `usize::MAX` (on 32-bit)
-    /// - Max fragments: 1024
-    /// - Max handshake: 64 KB
+    /// This configuration allows extremely large frames and messages (up to 4GB),
+    /// which can lead to memory exhaustion attacks. Only use in fully trusted
+    /// environments where all clients are known and controlled.
     ///
-    /// Note: On 32-bit platforms, the limits are capped at `usize::MAX` to
-    /// prevent integer overflow.
+    /// For production use, prefer `Limits::default()` or `Limits::embedded()`.
     #[cfg(target_pointer_width = "64")]
     #[must_use]
+    #[deprecated(
+        since = "0.2.0",
+        note = "unrestricted limits are dangerous in production; use Limits::default() instead"
+    )]
     pub const fn unrestricted() -> Self {
         Self {
             max_frame_size: 1024 * 1024 * 1024,       // 1 GB
@@ -99,11 +101,19 @@ impl Limits {
 
     /// Create limits for unrestricted use (32-bit platforms).
     ///
-    /// Warning: Use only in trusted environments.
+    /// # Security Warning
     ///
-    /// On 32-bit platforms, limits are set to `usize::MAX` to avoid overflow.
+    /// This configuration allows extremely large frames and messages (up to 4GB),
+    /// which can lead to memory exhaustion attacks. Only use in fully trusted
+    /// environments where all clients are known and controlled.
+    ///
+    /// For production use, prefer `Limits::default()` or `Limits::embedded()`.
     #[cfg(target_pointer_width = "32")]
     #[must_use]
+    #[deprecated(
+        since = "0.2.0",
+        note = "unrestricted limits are dangerous in production; use Limits::default() instead"
+    )]
     pub const fn unrestricted() -> Self {
         Self {
             max_frame_size: usize::MAX,
