@@ -151,6 +151,100 @@ mod x86_simd {
 }
 
 // ============================================================================
+// ARM64 SVE implementation (Scalable Vector Extension)
+// ============================================================================
+
+#[cfg(target_arch = "aarch64")]
+mod sve {
+    use core::arch::asm;
+
+    /// SVE implementation: processes variable-length vectors (128-2048 bits).
+    ///
+    /// SVE uses predicated operations that automatically handle tail elements,
+    /// eliminating the need for a separate scalar tail loop.
+    ///
+    /// # Safety
+    /// Caller must ensure that SVE is available on the current CPU.
+    /// Use `std::arch::is_aarch64_feature_detected!("sve")` before calling.
+    ///
+    /// # QEMU Verification
+    /// To test SVE support in QEMU:
+    /// ```bash
+    /// qemu-aarch64 -cpu max ./target/aarch64-unknown-linux-gnu/release/examples/your_binary
+    /// ```
+    /// Or with specific vector length (e.g., 256-bit):
+    /// ```bash
+    /// qemu-aarch64 -cpu max,sve256=on ./target/aarch64-unknown-linux-gnu/release/examples/your_binary
+    /// ```
+    #[inline]
+    #[target_feature(enable = "sve")]
+    pub unsafe fn apply_mask_sve(data: &mut [u8], mask: [u8; 4]) {
+        let len = data.len();
+        if len == 0 {
+            return;
+        }
+
+        let ptr = data.as_mut_ptr();
+        let mask_u32 = u32::from_ne_bytes(mask);
+
+        // SAFETY: This asm! block requires SVE support, which must be verified
+        // by the caller using is_aarch64_feature_detected!("sve").
+        //
+        // Register usage:
+        // - ptr: base pointer to data buffer (input, not modified)
+        // - len: total byte count (input, not modified)
+        // - mask: 4-byte mask as u32 (input, not modified)
+        // - idx: loop index (output, starts at 0)
+        // - w3: temporary for mask value
+        // - z0: data vector (loaded, XORed, stored)
+        // - z1: mask vector (replicated 4-byte mask)
+        // - p0: predicate register (controls which lanes are active)
+        //
+        // The loop uses whilelt to create a predicate for valid bytes,
+        // processes those bytes with predicated load/XOR/store, then
+        // increments the index by the SVE vector length. This naturally
+        // handles any tail elements without a separate scalar loop.
+        asm!(
+            // Replicate the 4-byte mask across all 32-bit lanes of z1
+            "mov w3, {mask:w}",
+            "dup z1.s, w3",
+
+            // Initialize loop index to 0
+            "mov {idx}, #0",
+
+            // Main processing loop
+            "2:",
+            // Create predicate: p0[i] = true if idx + i < len
+            "whilelt p0.b, {idx}, {len}",
+            // Exit if no active lanes (all bytes processed)
+            "b.none 3f",
+            // Load bytes with predicate (inactive lanes get zero)
+            "ld1b z0.b, p0/z, [{ptr}, {idx}]",
+            // XOR data with mask
+            "eor z0.b, z0.b, z1.b",
+            // Store bytes with predicate (only active lanes written)
+            "st1b z0.b, p0, [{ptr}, {idx}]",
+            // Increment index by SVE vector length in bytes
+            "incb {idx}",
+            // Continue loop
+            "b 2b",
+            "3:",
+
+            ptr = in(reg) ptr,
+            len = in(reg) len,
+            mask = in(reg) mask_u32,
+            idx = out(reg) _,
+            // Clobbers: w3 is used as temporary, z0/z1/p0 are SVE registers
+            out("w3") _,
+            out("p0") _,
+            out("z0") _,
+            out("z1") _,
+            options(nostack)
+        );
+    }
+}
+
+// ============================================================================
 // ARM64 NEON SIMD implementation
 // ============================================================================
 
@@ -158,7 +252,7 @@ mod x86_simd {
 mod aarch64_simd {
     use std::arch::aarch64::*;
 
-    /// NEON implementation: processes 16 bytes per iteration.
+    /// NEON implementation: processes 64 bytes per iteration (4x 128-bit vectors).
     ///
     /// # Safety
     /// Caller must ensure that NEON is available on the current CPU.
@@ -169,19 +263,56 @@ mod aarch64_simd {
             return;
         }
 
+        // Create 16-byte mask vector (4x repeated 4-byte mask)
         let mask_bytes: [u8; 16] = [
             mask[0], mask[1], mask[2], mask[3], mask[0], mask[1], mask[2], mask[3], mask[0],
             mask[1], mask[2], mask[3], mask[0], mask[1], mask[2], mask[3],
         ];
-        // SAFETY: mask_bytes is a valid 16-byte array
+        // SAFETY: mask_bytes is a valid 16-byte aligned array
         let mask_vec = unsafe { vld1q_u8(mask_bytes.as_ptr()) };
 
-        let chunks = len / 16;
         let ptr = data.as_mut_ptr();
 
-        for i in 0..chunks {
-            let offset = i * 16;
-            // SAFETY: chunks = len / 16, so offset + 16 <= len. ptr.add(offset) is valid for 16 bytes.
+        // Process 64-byte chunks (4x 16-byte vectors per iteration)
+        let chunks_64 = len / 64;
+        for i in 0..chunks_64 {
+            let offset = i * 64;
+            // SAFETY: chunks_64 = len / 64, so offset + 64 <= len.
+            // ptr.add(offset + 0/16/32/48) are all valid for 16 bytes each.
+            unsafe {
+                let ptr0 = ptr.add(offset);
+                let ptr1 = ptr.add(offset + 16);
+                let ptr2 = ptr.add(offset + 32);
+                let ptr3 = ptr.add(offset + 48);
+
+                // Load 4 vectors (64 bytes total)
+                let v0 = vld1q_u8(ptr0);
+                let v1 = vld1q_u8(ptr1);
+                let v2 = vld1q_u8(ptr2);
+                let v3 = vld1q_u8(ptr3);
+
+                // XOR each with mask
+                let r0 = veorq_u8(v0, mask_vec);
+                let r1 = veorq_u8(v1, mask_vec);
+                let r2 = veorq_u8(v2, mask_vec);
+                let r3 = veorq_u8(v3, mask_vec);
+
+                // Store 4 results (64 bytes total)
+                vst1q_u8(ptr0, r0);
+                vst1q_u8(ptr1, r1);
+                vst1q_u8(ptr2, r2);
+                vst1q_u8(ptr3, r3);
+            }
+        }
+
+        // Handle remaining 16-63 bytes with 16-byte loop
+        let tail_64_start = chunks_64 * 64;
+        let remaining = len - tail_64_start;
+        let chunks_16 = remaining / 16;
+
+        for i in 0..chunks_16 {
+            let offset = tail_64_start + i * 16;
+            // SAFETY: offset + 16 <= tail_64_start + remaining <= len
             unsafe {
                 let data_ptr = ptr.add(offset);
                 let data_vec = vld1q_u8(data_ptr);
@@ -190,8 +321,9 @@ mod aarch64_simd {
             }
         }
 
-        let tail_start = chunks * 16;
-        for i in tail_start..len {
+        // Handle remaining 0-15 bytes with scalar loop
+        let scalar_start = tail_64_start + chunks_16 * 16;
+        for i in scalar_start..len {
             // SAFETY: i < len, so ptr.add(i) is valid
             unsafe { *ptr.add(i) ^= mask[i % 4] };
         }
@@ -239,10 +371,10 @@ pub fn apply_mask_simd(data: &mut [u8], mask: [u8; 4]) {
 
     #[cfg(target_arch = "aarch64")]
     {
-        // SAFETY: is_aarch64_feature_detected! is a safe macro that checks CPU features at runtime.
+        if std::arch::is_aarch64_feature_detected!("sve") {
+            return unsafe { sve::apply_mask_sve(data, mask) };
+        }
         if std::arch::is_aarch64_feature_detected!("neon") {
-            // SAFETY: NEON feature is confirmed available by the runtime check above.
-            // apply_mask_neon requires NEON, which we just verified is present.
             return unsafe { aarch64_simd::apply_mask_neon(data, mask) };
         }
     }

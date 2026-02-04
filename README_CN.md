@@ -262,15 +262,31 @@ rsws 通过 SIMD 加速实现 **>150 GiB/s** 掩码吞吐量：
 | 1 MB | 7.07 GiB/s | 101.2 GiB/s | ~14x |
 
 **优化技术：**
-- 运行时 CPU 特性检测（AVX2/SSE2/NEON）
+- 运行时 CPU 特性检测（AVX2/SSE2/NEON/SVE）
 - 零拷贝 `Bytes` 解析（非掩码帧）
 - 单缓冲区消息重组
 - `send_batch()` 批量发送减少系统调用
 - 可配置读写缓冲区大小
 
+### aarch64 (ARM64) 专项优化
+
+rsws 针对 ARM64 平台（Apple M1/M2、AWS Graviton 等）进行了专项优化：
+
+| 特性 | 实现方式 | 详情 |
+|------|----------|------|
+| **NEON 掩码** | 64字节循环展开 | 每次迭代处理 4x 128-bit 向量 |
+| **SVE 掩码** | 内联汇编 | 谓词循环，自动处理尾部字节 |
+| **UTF-8 验证** | NEON 快速路径 | SIMD ASCII 检测 + 标量回退 |
+
+**运行时调度优先级：**
+```
+SVE (Graviton 3+) → NEON (所有 ARM64) → 标量 (回退)
+```
+
 运行基准测试：
 ```bash
-cargo bench --bench benchmarks
+cargo bench --bench benchmarks  # 掩码吞吐量
+cargo bench --bench utf8        # UTF-8 验证吞吐量
 ```
 
 ## RFC 6455 合规性

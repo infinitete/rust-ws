@@ -3,6 +3,8 @@
 [![CI](https://github.com/infinitete/rust-ws/actions/workflows/ci.yml/badge.svg)](https://github.com/infinitete/rust-ws/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
+English | [中文](README_CN.md)
+
 A production-grade, RFC 6455 compliant WebSocket library for Rust.
 
 ## Features
@@ -260,15 +262,31 @@ rsws achieves **>150 GiB/s** masking throughput via SIMD acceleration:
 | 1 MB | 7.07 GiB/s | 101.2 GiB/s | ~14x |
 
 **Optimizations:**
-- Runtime CPU feature detection (AVX2/SSE2/NEON)
+- Runtime CPU feature detection (AVX2/SSE2/NEON/SVE)
 - Zero-copy `Bytes`-based parsing for unmasked frames
 - Single-buffer message reassembly
 - Batch sending with `send_batch()` to reduce syscalls
 - Configurable read/write buffer sizes
 
+### aarch64 (ARM64) Optimizations
+
+rsws includes specialized optimizations for ARM64 platforms (Apple M1/M2, AWS Graviton, etc.):
+
+| Feature | Implementation | Details |
+|---------|----------------|---------|
+| **NEON Masking** | 64-byte unrolled | 4x 128-bit vectors per iteration |
+| **SVE Masking** | Inline assembly | Predicated loops, auto tail handling |
+| **UTF-8 Validation** | NEON fast-path | SIMD ASCII detection + scalar fallback |
+
+**Runtime Dispatch Priority:**
+```
+SVE (Graviton 3+) → NEON (all ARM64) → Scalar (fallback)
+```
+
 Run benchmarks:
 ```bash
-cargo bench --bench benchmarks
+cargo bench --bench benchmarks  # Masking throughput
+cargo bench --bench utf8        # UTF-8 validation throughput
 ```
 
 ## RFC 6455 Compliance

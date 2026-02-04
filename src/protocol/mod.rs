@@ -6,6 +6,7 @@ pub mod handshake;
 pub mod mask;
 pub mod opcode;
 pub mod utf8;
+pub mod utf8_simd;
 pub mod validation;
 
 pub use assembler::{AssembledMessage, MessageAssembler};
