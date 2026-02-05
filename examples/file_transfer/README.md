@@ -2,6 +2,8 @@
 
 A production-ready WebSocket file transfer application demonstrating the rsws library with binary chunk handling and a React frontend.
 
+![Screenshot](screenshot.png)
+
 ## Features
 
 - Real-time file transfer between connected users

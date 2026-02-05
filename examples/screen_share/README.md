@@ -2,6 +2,8 @@
 
 A real-time screen sharing application demonstrating the rsws WebSocket library with WebRTC for peer-to-peer media streaming.
 
+![Screenshot](screenshot.png)
+
 ## Features
 
 - Real-time screen sharing via WebRTC

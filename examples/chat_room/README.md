@@ -2,6 +2,8 @@
 
 A production-ready WebSocket chat room demonstrating the rsws library with a React frontend.
 
+![Screenshot](screenshot.png)
+
 ## Features
 
 - Real-time messaging with WebSocket
