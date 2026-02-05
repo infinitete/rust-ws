@@ -52,18 +52,18 @@ pub async fn handle_connection(
                                     println!("  [{}] User '{}' joining room '{}'", addr, user, rid);
                                     let room = room_manager.get_or_create_room(&rid).await;
                                     let (_, receiver) = room.add_user(user.clone()).await;
-                                    
+
                                     let users = room.get_users().await;
                                     let joined_msg = ServerMessage::Joined {
                                         username: user.clone(),
                                         room_id: rid.clone(),
                                         users,
                                     };
-                                    
+
                                     if let Ok(json) = serde_json::to_string(&joined_msg) {
                                         let _ = conn.send(Message::text(json)).await;
                                     }
-                                    
+
                                     username = Some(user);
                                     room_id = Some(rid);
                                     rx = Some(receiver);
@@ -153,7 +153,7 @@ pub async fn handle_connection(
                                 username.as_ref().map(|u| u == to).unwrap_or(false)
                             }
                         };
-                        
+
                         if should_send {
                             let msg = match room_msg {
                                 RoomMessage::Broadcast(m) => m,

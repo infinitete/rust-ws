@@ -31,7 +31,10 @@ impl Room {
         }
     }
 
-    pub async fn add_user(&self, username: String) -> (ServerMessage, broadcast::Receiver<RoomMessage>) {
+    pub async fn add_user(
+        &self,
+        username: String,
+    ) -> (ServerMessage, broadcast::Receiver<RoomMessage>) {
         let mut inner = self.inner.write().await;
         let user_info = UserInfo {
             username: username.clone(),
@@ -41,10 +44,7 @@ impl Room {
         let users: Vec<UserInfo> = inner.users.values().cloned().collect();
         let rx = inner.tx.subscribe();
 
-        let msg = ServerMessage::UserJoined {
-            username,
-            users,
-        };
+        let msg = ServerMessage::UserJoined { username, users };
         let _ = inner.tx.send(RoomMessage::Broadcast(msg.clone()));
         (msg, rx)
     }

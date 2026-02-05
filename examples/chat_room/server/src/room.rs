@@ -1,6 +1,6 @@
+use crate::types::ServerMessage;
 use std::sync::Arc;
 use tokio::sync::{broadcast, RwLock};
-use crate::types::ServerMessage;
 
 #[derive(Clone)]
 pub struct ChatRoom {
