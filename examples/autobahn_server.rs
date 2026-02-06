@@ -84,7 +84,7 @@ async fn handle_connection(mut stream: TcpStream) -> Result<(), Box<dyn Error + 
                 conn.send(Message::text(text)).await?;
             }
             Some(Message::Binary(data)) => {
-                conn.send(Message::binary(data)).await?;
+                conn.send(Message::Binary(data)).await?;
             }
             Some(Message::Ping(_)) | Some(Message::Pong(_)) => {}
             Some(Message::Close(_)) | None => break,

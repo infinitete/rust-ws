@@ -310,6 +310,60 @@ fn bench_reassembly(c: &mut Criterion) {
 }
 
 // =============================================================================
+// Connection Round-trip Benchmarks
+// =============================================================================
+
+fn bench_connection_roundtrip(c: &mut Criterion) {
+    use rsws::{Connection, Message, Role};
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let mut group = c.benchmark_group("connection_roundtrip");
+
+    for &size in &[1024usize, 65536] {
+        let label = if size >= 1024 {
+            format!("binary_{}kb", size / 1024)
+        } else {
+            format!("binary_{}b", size)
+        };
+
+        group.throughput(Throughput::Bytes(size as u64));
+        group.bench_function(&label, |b| {
+            let payload = vec![0xABu8; size];
+            b.iter(|| {
+                rt.block_on(async {
+                    let (client_io, server_io) = tokio::io::duplex(size * 4);
+                    let mut client = Connection::new(client_io, Role::Client, Config::client());
+                    let mut server = Connection::new(server_io, Role::Server, Config::server());
+
+                    client.send(Message::binary(payload.clone())).await.unwrap();
+                    let msg = server.recv().await.unwrap().unwrap();
+                    black_box(msg);
+                })
+            });
+        });
+    }
+
+    // Text message round-trip
+    group.throughput(Throughput::Bytes(1024));
+    group.bench_function("text_1kb", |b| {
+        let text = "A".repeat(1024);
+        b.iter(|| {
+            rt.block_on(async {
+                let (client_io, server_io) = tokio::io::duplex(8192);
+                let mut client = Connection::new(client_io, Role::Client, Config::client());
+                let mut server = Connection::new(server_io, Role::Server, Config::server());
+
+                client.send(Message::text(text.clone())).await.unwrap();
+                let msg = server.recv().await.unwrap().unwrap();
+                black_box(msg);
+            })
+        });
+    });
+
+    group.finish();
+}
+
+// =============================================================================
 // Criterion Setup
 // =============================================================================
 
@@ -318,7 +372,8 @@ criterion_group!(
     bench_frame_parsing,
     bench_masking,
     bench_handshake,
-    bench_reassembly
+    bench_reassembly,
+    bench_connection_roundtrip
 );
 
 criterion_main!(benches);

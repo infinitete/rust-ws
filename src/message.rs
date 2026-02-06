@@ -1,5 +1,7 @@
 //! WebSocket message types and close codes as defined in RFC 6455.
 
+use bytes::Bytes;
+
 /// WebSocket close status code per RFC 6455 Section 7.4.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 #[non_exhaustive]
@@ -119,11 +121,11 @@ pub enum Message {
     /// A text message (UTF-8 encoded).
     Text(String),
     /// A binary message (arbitrary bytes).
-    Binary(Vec<u8>),
+    Binary(Bytes),
     /// A ping frame (control frame, payload <= 125 bytes).
-    Ping(Vec<u8>),
+    Ping(Bytes),
     /// A pong frame (control frame, payload <= 125 bytes).
-    Pong(Vec<u8>),
+    Pong(Bytes),
     /// A close frame (control frame, may include status code and reason).
     Close(Option<CloseFrame>),
 }
@@ -138,19 +140,19 @@ impl Message {
     /// Create a binary message.
     #[must_use]
     pub fn binary(data: impl Into<Vec<u8>>) -> Self {
-        Message::Binary(data.into())
+        Message::Binary(Bytes::from(data.into()))
     }
 
     /// Create a ping message.
     #[must_use]
     pub fn ping(data: impl Into<Vec<u8>>) -> Self {
-        Message::Ping(data.into())
+        Message::Ping(Bytes::from(data.into()))
     }
 
     /// Create a pong message.
     #[must_use]
     pub fn pong(data: impl Into<Vec<u8>>) -> Self {
-        Message::Pong(data.into())
+        Message::Pong(Bytes::from(data.into()))
     }
 
     /// Create a close message with status code and reason.
@@ -197,7 +199,7 @@ impl Message {
 
     /// Consume and return the binary content, if this is a binary message.
     #[must_use]
-    pub fn into_binary(self) -> Option<Vec<u8>> {
+    pub fn into_binary(self) -> Option<Bytes> {
         match self {
             Message::Binary(data) => Some(data),
             _ => None,
@@ -260,9 +262,9 @@ impl From<Message> for Frame {
     fn from(message: Message) -> Self {
         match message {
             Message::Text(text) => Frame::text(text.into_bytes()),
-            Message::Binary(data) => Frame::binary(data),
-            Message::Ping(data) => Frame::ping(data),
-            Message::Pong(data) => Frame::pong(data),
+            Message::Binary(data) => Frame::binary_from_bytes(data),
+            Message::Ping(data) => Frame::ping(data.to_vec()),
+            Message::Pong(data) => Frame::pong(data.to_vec()),
             Message::Close(close_frame) => {
                 if let Some(cf) = close_frame {
                     Frame::close(Some(cf.code.as_u16()), &cf.reason)
@@ -290,19 +292,19 @@ mod tests {
     #[test]
     fn test_message_binary_creation() {
         let msg = Message::binary(vec![1, 2, 3]);
-        assert!(matches!(msg, Message::Binary(ref d) if d == &[1, 2, 3]));
+        assert!(matches!(msg, Message::Binary(ref d) if d == &[1, 2, 3][..]));
 
         let msg = Message::binary([4, 5, 6]);
-        assert!(matches!(msg, Message::Binary(ref d) if d == &[4, 5, 6]));
+        assert!(matches!(msg, Message::Binary(ref d) if d == &[4, 5, 6][..]));
     }
 
     #[test]
     fn test_message_ping_pong() {
         let ping = Message::ping(vec![1, 2, 3]);
-        assert!(matches!(ping, Message::Ping(ref d) if d == &[1, 2, 3]));
+        assert!(matches!(ping, Message::Ping(ref d) if d == &[1, 2, 3][..]));
 
         let pong = Message::pong(vec![1, 2, 3]);
-        assert!(matches!(pong, Message::Pong(ref d) if d == &[1, 2, 3]));
+        assert!(matches!(pong, Message::Pong(ref d) if d == &[1, 2, 3][..]));
     }
 
     #[test]
@@ -353,7 +355,7 @@ mod tests {
     #[test]
     fn test_message_into_binary() {
         let msg = Message::binary(vec![1, 2, 3]);
-        assert_eq!(msg.into_binary(), Some(vec![1, 2, 3]));
+        assert_eq!(msg.into_binary().unwrap(), &[1, 2, 3][..]);
 
         let msg = Message::text("hello");
         assert_eq!(msg.into_binary(), None);

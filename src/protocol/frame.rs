@@ -188,6 +188,19 @@ impl Frame {
         }
     }
 
+    /// Create a new frame with a `Bytes` payload (zero-copy).
+    #[must_use]
+    pub fn new_from_bytes(fin: bool, opcode: OpCode, payload: Bytes) -> Self {
+        Self {
+            fin,
+            rsv1: false,
+            rsv2: false,
+            rsv3: false,
+            opcode,
+            payload: Payload::Shared(payload),
+        }
+    }
+
     /// Create a text frame.
     #[must_use]
     pub fn text(data: impl Into<Vec<u8>>) -> Self {
@@ -198,6 +211,12 @@ impl Frame {
     #[must_use]
     pub fn binary(data: impl Into<Vec<u8>>) -> Self {
         Self::new(true, OpCode::Binary, data.into())
+    }
+
+    /// Create a binary frame from `Bytes` (zero-copy).
+    #[must_use]
+    pub fn binary_from_bytes(data: Bytes) -> Self {
+        Self::new_from_bytes(true, OpCode::Binary, data)
     }
 
     /// Create a close frame with optional status code and reason.
@@ -235,12 +254,24 @@ impl Frame {
         }
     }
 
-    /// Take ownership of the payload.
+    /// Take ownership of the payload as `Vec<u8>`.
     #[must_use]
     pub fn into_payload(self) -> Vec<u8> {
         match self.payload {
             Payload::Owned(data) => data,
             Payload::Shared(data) => data.to_vec(),
+        }
+    }
+
+    /// Take ownership of the payload as `Bytes` (zero-copy).
+    ///
+    /// - `Payload::Owned(Vec<u8>)` is wrapped via `Bytes::from()` (O(1))
+    /// - `Payload::Shared(Bytes)` is returned directly (O(1))
+    #[must_use]
+    pub fn into_payload_bytes(self) -> Bytes {
+        match self.payload {
+            Payload::Owned(data) => Bytes::from(data),
+            Payload::Shared(data) => data,
         }
     }
 

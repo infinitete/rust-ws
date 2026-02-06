@@ -31,6 +31,7 @@ pub mod protocol;
 #[cfg(feature = "async-tokio")]
 pub mod codec;
 
+pub use bytes::Bytes;
 pub use config::{Config, Limits};
 #[cfg(feature = "async-tokio")]
 pub use connection::Connection;

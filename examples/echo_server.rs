@@ -67,7 +67,7 @@ async fn handle_connection(mut stream: TcpStream) -> Result<(), Box<dyn Error + 
             }
             Some(Message::Binary(data)) => {
                 println!("  Received binary: {} bytes", data.len());
-                conn.send(Message::binary(data)).await?;
+                conn.send(Message::Binary(data)).await?;
             }
             Some(Message::Ping(data)) => {
                 println!(

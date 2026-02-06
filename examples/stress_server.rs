@@ -255,7 +255,7 @@ async fn handle_connection_inner(
             }
             Some(Message::Binary(data)) => {
                 let len = data.len();
-                conn.send(Message::binary(data)).await?;
+                conn.send(Message::Binary(data)).await?;
                 metrics.message_echoed(len);
             }
             Some(Message::Ping(_)) | Some(Message::Pong(_)) => {}

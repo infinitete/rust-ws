@@ -998,7 +998,7 @@ dependencies = [
 
 [[package]]
 name = "rsws"
-version = "0.2.2"
+version = "0.2.4"
 dependencies = [
  "base64",
  "bytes",

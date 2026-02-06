@@ -1,6 +1,6 @@
 //! Message fragmentation and reassembly for WebSocket (RFC 6455).
 
-use bytes::BytesMut;
+use bytes::{Bytes, BytesMut};
 
 use crate::config::Config;
 use crate::error::{Error, Result};
@@ -83,26 +83,42 @@ impl MessageAssembler {
             validator.validate(frame.payload(), frame.fin)?;
         }
 
-        if self.fragment_count == 0 && !frame.fin {
-            self.buffer.reserve(frame.payload().len() * 4);
-        }
-
         self.total_size = new_size;
-        self.buffer.extend_from_slice(frame.payload());
-        self.fragment_count += 1;
 
-        if frame.fin {
-            let payload = self.buffer.split().freeze().to_vec();
+        // Fast path: single-frame message — skip buffer entirely
+        if frame.fin && self.fragment_count == 0 {
+            let payload = frame.into_payload_bytes();
             let opcode = self.opcode.take().ok_or_else(|| {
                 Error::ProtocolViolation(
                     "Internal error: opcode not set during message assembly".into(),
                 )
             })?;
             let rsv1 = self.first_frame_rsv1;
-            self.total_size = 0;
-            self.fragment_count = 0;
-            self.utf8_validator = None;
-            self.first_frame_rsv1 = false;
+            self.reset_state();
+            return Ok(Some(AssembledMessage {
+                opcode,
+                payload,
+                rsv1,
+            }));
+        }
+
+        // Multi-frame: accumulate in buffer
+        if self.fragment_count == 0 && !frame.fin {
+            self.buffer.reserve(frame.payload().len() * 4);
+        }
+
+        self.buffer.extend_from_slice(frame.payload());
+        self.fragment_count += 1;
+
+        if frame.fin {
+            let payload = self.buffer.split().freeze();
+            let opcode = self.opcode.take().ok_or_else(|| {
+                Error::ProtocolViolation(
+                    "Internal error: opcode not set during message assembly".into(),
+                )
+            })?;
+            let rsv1 = self.first_frame_rsv1;
+            self.reset_state();
             Ok(Some(AssembledMessage {
                 opcode,
                 payload,
@@ -116,6 +132,13 @@ impl MessageAssembler {
     /// Returns `true` if a message is currently being assembled.
     pub fn is_assembling(&self) -> bool {
         self.opcode.is_some()
+    }
+
+    fn reset_state(&mut self) {
+        self.total_size = 0;
+        self.fragment_count = 0;
+        self.utf8_validator = None;
+        self.first_frame_rsv1 = false;
     }
 
     /// Reset the assembler, discarding any partial message.
@@ -138,7 +161,7 @@ pub struct AssembledMessage {
     /// The opcode of the original message (Text or Binary).
     pub opcode: OpCode,
     /// The complete message payload.
-    pub payload: Vec<u8>,
+    pub payload: Bytes,
     /// RSV1 from first frame (RFC 7692: indicates compression)
     pub rsv1: bool,
 }
@@ -150,11 +173,11 @@ impl AssembledMessage {
     ///
     /// Returns `Error::InvalidUtf8` if the payload is not valid UTF-8.
     pub fn into_text(self) -> Result<String> {
-        String::from_utf8(self.payload).map_err(|_| Error::InvalidUtf8)
+        String::from_utf8(self.payload.to_vec()).map_err(|_| Error::InvalidUtf8)
     }
 
-    /// Get the payload as raw bytes.
-    pub fn into_binary(self) -> Vec<u8> {
+    /// Get the payload as `Bytes`.
+    pub fn into_binary(self) -> Bytes {
         self.payload
     }
 }
@@ -182,7 +205,7 @@ mod tests {
 
         let msg = result.unwrap();
         assert_eq!(msg.opcode, OpCode::Text);
-        assert_eq!(msg.payload, b"Hello");
+        assert_eq!(msg.payload, &b"Hello"[..]);
         assert!(!assembler.is_assembling());
     }
 
@@ -200,7 +223,7 @@ mod tests {
 
         let msg = result.unwrap();
         assert_eq!(msg.opcode, OpCode::Text);
-        assert_eq!(msg.payload, b"Hello");
+        assert_eq!(msg.payload, &b"Hello"[..]);
     }
 
     #[test]
@@ -239,7 +262,7 @@ mod tests {
         let result = assembler.push(frame2).unwrap();
 
         let msg = result.unwrap();
-        assert_eq!(msg.payload, b"Hello");
+        assert_eq!(msg.payload, &b"Hello"[..]);
     }
 
     #[test]
@@ -319,7 +342,7 @@ mod tests {
     fn test_assembled_message_into_text() {
         let msg = AssembledMessage {
             opcode: OpCode::Text,
-            payload: b"Hello".to_vec(),
+            payload: Bytes::from_static(b"Hello"),
             rsv1: false,
         };
         assert_eq!(msg.into_text().unwrap(), "Hello");

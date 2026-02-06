@@ -1,3 +1,4 @@
+use bytes::Bytes;
 use tokio::io::{AsyncRead, AsyncWrite};
 
 use crate::codec::WebSocketCodec;
@@ -41,7 +42,7 @@ pub struct Connection<T> {
     codec: WebSocketCodec<T>,
     state: ConnectionState,
     assembler: MessageAssembler,
-    pending_pong: Option<Vec<u8>>,
+    pending_pong: Option<Bytes>,
     extensions: ExtensionRegistry,
 }
 
@@ -252,7 +253,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
 
         loop {
             if let Some(pong_data) = self.pending_pong.take() {
-                let pong_frame = Frame::pong(pong_data);
+                let pong_frame = Frame::pong(pong_data.to_vec());
                 self.codec.write_frame(&pong_frame).await?;
                 self.codec.flush().await?;
             }
@@ -269,12 +270,13 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
             match frame.opcode {
                 OpCode::Ping => {
                     frame.validate()?;
-                    self.pending_pong = Some(frame.payload().to_vec());
-                    return Ok(Some(Message::Ping(frame.into_payload())));
+                    let payload = frame.into_payload_bytes();
+                    self.pending_pong = Some(payload.clone());
+                    return Ok(Some(Message::Ping(payload)));
                 }
                 OpCode::Pong => {
                     frame.validate()?;
-                    return Ok(Some(Message::Pong(frame.into_payload())));
+                    return Ok(Some(Message::Pong(frame.into_payload_bytes())));
                 }
                 OpCode::Close => {
                     frame.validate()?;
@@ -307,15 +309,15 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
     /// Send a ping frame.
     ///
     /// This is a convenience method that wraps `send(Message::Ping(...))`.
-    pub async fn ping(&mut self, data: Vec<u8>) -> Result<()> {
-        self.send(Message::Ping(data)).await
+    pub async fn ping(&mut self, data: impl Into<Bytes>) -> Result<()> {
+        self.send(Message::Ping(data.into())).await
     }
 
     /// Send a pong frame.
     ///
     /// This is a convenience method that wraps `send(Message::Pong(...))`.
-    pub async fn pong(&mut self, data: Vec<u8>) -> Result<()> {
-        self.send(Message::Pong(data)).await
+    pub async fn pong(&mut self, data: impl Into<Bytes>) -> Result<()> {
+        self.send(Message::Pong(data.into())).await
     }
 
     /// Initiate a close handshake.
@@ -369,17 +371,17 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
 
     fn assembled_to_message(&mut self, assembled: AssembledMessage) -> Result<Message> {
         let payload = if assembled.rsv1 && self.extensions.negotiated_count() > 0 {
-            let mut frame = Frame::new(true, assembled.opcode, assembled.payload);
+            let mut frame = Frame::new_from_bytes(true, assembled.opcode, assembled.payload);
             frame.rsv1 = true;
             self.extensions.decode(&mut frame)?;
-            frame.into_payload()
+            frame.into_payload_bytes()
         } else {
             assembled.payload
         };
 
         match assembled.opcode {
             OpCode::Text => {
-                let text = String::from_utf8(payload).map_err(|_| Error::InvalidUtf8)?;
+                let text = String::from_utf8(payload.to_vec()).map_err(|_| Error::InvalidUtf8)?;
                 Ok(Message::Text(text))
             }
             OpCode::Binary => Ok(Message::Binary(payload)),
@@ -507,7 +509,7 @@ mod tests {
         let mut conn = Connection::new(stream, Role::Server, Config::server());
 
         let msg = conn.recv().await.unwrap().unwrap();
-        assert!(matches!(msg, Message::Ping(ref d) if d == b"ping"));
+        assert!(matches!(msg, Message::Ping(ref d) if d == &b"ping"[..]));
 
         assert!(conn.pending_pong.is_some());
     }
@@ -552,7 +554,7 @@ mod tests {
         let mut conn = Connection::new(stream, Role::Server, Config::server());
 
         let msg = conn.recv().await.unwrap().unwrap();
-        assert!(matches!(msg, Message::Binary(ref d) if d == &[1, 2, 3]));
+        assert!(matches!(msg, Message::Binary(ref d) if d == &[1, 2, 3][..]));
     }
 
     #[tokio::test]
@@ -563,7 +565,7 @@ mod tests {
         let mut conn = Connection::new(stream, Role::Server, Config::server());
 
         let msg = conn.recv().await.unwrap().unwrap();
-        assert!(matches!(msg, Message::Pong(ref d) if d == b"pong"));
+        assert!(matches!(msg, Message::Pong(ref d) if d == &b"pong"[..]));
     }
 
     #[tokio::test]

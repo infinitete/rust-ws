@@ -70,7 +70,7 @@ pub async fn handle_connection(
                     }
                     Ok(Some(Message::Binary(data))) => {
                         if let Some(ref user) = username {
-                            if let Err(e) = handle_binary_chunk(user, data, &room, addr).await {
+                            if let Err(e) = handle_binary_chunk(user, data.to_vec(), &room, addr).await {
                                 eprintln!("  [{}] Binary chunk error: {}", addr, e);
                             }
                         }

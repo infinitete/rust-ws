@@ -105,7 +105,7 @@ impl TestServer {
                     conn.send(Message::text(text)).await?;
                 }
                 Some(Message::Binary(data)) => {
-                    conn.send(Message::binary(data)).await?;
+                    conn.send(Message::Binary(data)).await?;
                 }
                 Some(Message::Ping(_) | Message::Pong(_)) => {}
                 Some(Message::Close(_)) => {
