@@ -3,6 +3,10 @@
 # AI assistant working files
 .sisyphus/
 .opencode/
+CLAUDE.md
+
+# Vite cache
+.vite/
 
 # Node.js
 node_modules/
