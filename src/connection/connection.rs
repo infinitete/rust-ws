@@ -135,10 +135,13 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
 
         self.sync_validator_extensions();
 
-        if let Message::Close(Some(cf)) = &message {
-            if !cf.code.is_valid() || cf.code.is_reserved() {
-                return Err(Error::InvalidCloseCode(cf.code.as_u16()));
+        if let Some(code) = match &message {
+            Message::Close(Some(cf)) if !cf.code.is_valid() || cf.code.is_reserved() => {
+                Some(cf.code.as_u16())
             }
+            _ => None,
+        } {
+            return Err(Error::InvalidCloseCode(code));
         }
 
         // Control frames are never fragmented
@@ -197,10 +200,13 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
 
         self.sync_validator_extensions();
 
-        if let Message::Close(Some(cf)) = &message {
-            if !cf.code.is_valid() || cf.code.is_reserved() {
-                return Err(Error::InvalidCloseCode(cf.code.as_u16()));
+        if let Some(code) = match &message {
+            Message::Close(Some(cf)) if !cf.code.is_valid() || cf.code.is_reserved() => {
+                Some(cf.code.as_u16())
             }
+            _ => None,
+        } {
+            return Err(Error::InvalidCloseCode(code));
         }
 
         // Control frames are never fragmented
