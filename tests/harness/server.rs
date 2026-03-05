@@ -86,7 +86,8 @@ impl TestServer {
 
         // Step 2: Parse and validate handshake request
         let request = HandshakeRequest::parse(&request_bytes)?;
-        request.validate()?;
+        let config = Config::server();
+        request.validate_with_config(&config)?;
 
         // Step 3: Generate and send handshake response
         let response = HandshakeResponse::from_request(&request);
@@ -95,7 +96,6 @@ impl TestServer {
         stream.write_all(&response_bytes).await?;
 
         // Step 4: Create WebSocket connection
-        let config = Config::server();
         let mut conn = Connection::new(stream, Role::Server, config);
 
         // Step 5: Echo loop - handle messages

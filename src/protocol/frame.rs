@@ -275,6 +275,12 @@ impl Frame {
         }
     }
 
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn payload_is_shared(&self) -> bool {
+        matches!(self.payload, Payload::Shared(_))
+    }
+
     /// Parse a frame from a buffer.
     ///
     /// Returns the parsed frame and the number of bytes consumed.

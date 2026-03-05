@@ -42,7 +42,7 @@ pub struct Connection<T> {
     codec: WebSocketCodec<T>,
     state: ConnectionState,
     assembler: MessageAssembler,
-    pending_pong: Option<Bytes>,
+    current_message_rsv_bits: u8,
     extensions: ExtensionRegistry,
 }
 
@@ -83,7 +83,7 @@ impl<T> Connection<T> {
             codec: WebSocketCodec::new(io, role, config),
             state: ConnectionState::Open,
             assembler,
-            pending_pong: None,
+            current_message_rsv_bits: 0,
             extensions,
         }
     }
@@ -103,6 +103,15 @@ impl<T> Connection<T> {
     /// Get mutable access to the extension registry.
     pub fn extensions_mut(&mut self) -> &mut ExtensionRegistry {
         &mut self.extensions
+    }
+
+    fn sync_validator_extensions(&mut self) {
+        self.codec
+            .set_allowed_rsv_bits(self.extensions.negotiated_rsv_mask());
+    }
+
+    fn frame_rsv_bits(frame: &Frame) -> u8 {
+        ((frame.rsv1 as u8) << 6) | ((frame.rsv2 as u8) << 5) | ((frame.rsv3 as u8) << 4)
     }
 }
 
@@ -124,9 +133,18 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
             return Err(Error::ConnectionClosed(None));
         }
 
+        self.sync_validator_extensions();
+
+        if let Message::Close(Some(cf)) = &message
+            && (!cf.code.is_valid() || cf.code.is_reserved())
+        {
+            return Err(Error::InvalidCloseCode(cf.code.as_u16()));
+        }
+
         // Control frames are never fragmented
         if message.is_control() {
             let frame = Frame::from(message);
+            frame.validate()?;
             self.codec.write_frame(&frame).await?;
             self.codec.flush().await?;
             return Ok(());
@@ -177,9 +195,18 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
             return Err(Error::ConnectionClosed(None));
         }
 
+        self.sync_validator_extensions();
+
+        if let Message::Close(Some(cf)) = &message
+            && (!cf.code.is_valid() || cf.code.is_reserved())
+        {
+            return Err(Error::InvalidCloseCode(cf.code.as_u16()));
+        }
+
         // Control frames are never fragmented
         if message.is_control() {
             let frame = Frame::from(message);
+            frame.validate()?;
             self.codec.write_frame(&frame).await?;
             return Ok(());
         }
@@ -252,11 +279,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
         }
 
         loop {
-            if let Some(pong_data) = self.pending_pong.take() {
-                let pong_frame = Frame::pong(pong_data.to_vec());
-                self.codec.write_frame(&pong_frame).await?;
-                self.codec.flush().await?;
-            }
+            self.sync_validator_extensions();
 
             let frame = match self.codec.read_frame().await {
                 Ok(f) => f,
@@ -271,7 +294,9 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
                 OpCode::Ping => {
                     frame.validate()?;
                     let payload = frame.into_payload_bytes();
-                    self.pending_pong = Some(payload.clone());
+                    let pong_frame = Frame::pong(payload.to_vec());
+                    self.codec.write_frame(&pong_frame).await?;
+                    self.codec.flush().await?;
                     return Ok(Some(Message::Ping(payload)));
                 }
                 OpCode::Pong => {
@@ -297,9 +322,24 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
                     return Ok(Some(Message::Close(close_frame)));
                 }
                 OpCode::Text | OpCode::Binary | OpCode::Continuation => {
+                    let frame_rsv_bits = Self::frame_rsv_bits(&frame);
                     frame.validate()?;
-                    if let Some(assembled) = self.assembler.push(frame)? {
-                        return Ok(Some(self.assembled_to_message(assembled)?));
+                    if frame.opcode != OpCode::Continuation && !self.assembler.is_assembling() {
+                        self.current_message_rsv_bits = frame_rsv_bits;
+                    }
+
+                    let assembled = match self.assembler.push(frame) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            self.current_message_rsv_bits = 0;
+                            return Err(e);
+                        }
+                    };
+
+                    if let Some(assembled) = assembled {
+                        let rsv_bits = self.current_message_rsv_bits;
+                        self.current_message_rsv_bits = 0;
+                        return Ok(Some(self.assembled_to_message(assembled, rsv_bits)?));
                     }
                 }
             }
@@ -341,6 +381,10 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
             return Err(Error::InvalidCloseCode(code.as_u16()));
         }
 
+        if !code.is_valid() {
+            return Err(Error::InvalidCloseCode(code.as_u16()));
+        }
+
         self.state = ConnectionState::Closing;
         let frame = Frame::close(Some(code.as_u16()), reason);
         self.codec.write_frame(&frame).await?;
@@ -369,10 +413,16 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
         }
     }
 
-    fn assembled_to_message(&mut self, assembled: AssembledMessage) -> Result<Message> {
-        let payload = if assembled.rsv1 && self.extensions.negotiated_count() > 0 {
+    fn assembled_to_message(
+        &mut self,
+        assembled: AssembledMessage,
+        rsv_bits: u8,
+    ) -> Result<Message> {
+        let payload = if rsv_bits != 0 && self.extensions.negotiated_count() > 0 {
             let mut frame = Frame::new_from_bytes(true, assembled.opcode, assembled.payload);
-            frame.rsv1 = true;
+            frame.rsv1 = (rsv_bits & 0x40) != 0;
+            frame.rsv2 = (rsv_bits & 0x20) != 0;
+            frame.rsv3 = (rsv_bits & 0x10) != 0;
             self.extensions.decode(&mut frame)?;
             frame.into_payload_bytes()
         } else {
@@ -393,14 +443,74 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::extensions::{Extension, ExtensionOffer, ExtensionParam, RsvBits};
     use std::io::Cursor;
     use std::pin::Pin;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::task::{Context, Poll};
     use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
     struct MockStream {
         read_data: Cursor<Vec<u8>>,
         write_data: Vec<u8>,
+    }
+
+    struct Rsv1TestExtension;
+
+    impl Extension for Rsv1TestExtension {
+        fn name(&self) -> &str {
+            "x-rsv1-test"
+        }
+
+        fn rsv_bits(&self) -> RsvBits {
+            RsvBits::RSV1
+        }
+
+        fn negotiate(&mut self, _params: &[ExtensionParam]) -> Result<Vec<ExtensionParam>> {
+            Ok(vec![])
+        }
+
+        fn encode(&mut self, _frame: &mut Frame) -> Result<()> {
+            Ok(())
+        }
+
+        fn decode(&mut self, frame: &mut Frame) -> Result<()> {
+            frame.rsv1 = false;
+            Ok(())
+        }
+    }
+
+    struct Rsv2DecodeTrackingExtension {
+        decoded: Arc<AtomicBool>,
+    }
+
+    impl Extension for Rsv2DecodeTrackingExtension {
+        fn name(&self) -> &str {
+            "x-rsv2-test"
+        }
+
+        fn rsv_bits(&self) -> RsvBits {
+            RsvBits {
+                rsv1: false,
+                rsv2: true,
+                rsv3: false,
+            }
+        }
+
+        fn negotiate(&mut self, _params: &[ExtensionParam]) -> Result<Vec<ExtensionParam>> {
+            Ok(vec![])
+        }
+
+        fn encode(&mut self, _frame: &mut Frame) -> Result<()> {
+            Ok(())
+        }
+
+        fn decode(&mut self, frame: &mut Frame) -> Result<()> {
+            self.decoded.store(true, Ordering::SeqCst);
+            frame.rsv2 = false;
+            Ok(())
+        }
     }
 
     impl MockStream {
@@ -510,8 +620,8 @@ mod tests {
 
         let msg = conn.recv().await.unwrap().unwrap();
         assert!(matches!(msg, Message::Ping(ref d) if d == &b"ping"[..]));
-
-        assert!(conn.pending_pong.is_some());
+        let written = conn.codec.into_inner().written().to_vec();
+        assert_eq!(written, vec![0x8a, 0x04, 0x70, 0x69, 0x6e, 0x67]);
     }
 
     #[tokio::test]
@@ -591,6 +701,15 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_send_ping_too_large_rejected() {
+        let stream = MockStream::new(vec![]);
+        let mut conn = Connection::new(stream, Role::Server, Config::server());
+
+        let result = conn.send(Message::ping(vec![0u8; 126])).await;
+        assert!(matches!(result, Err(Error::ControlFrameTooLarge(126))));
+    }
+
+    #[tokio::test]
     async fn test_recv_after_close_returns_none() {
         // Masked empty close: mask [0x00, 0x00, 0x00, 0x00]
         let close_frame = vec![0x88, 0x80, 0x00, 0x00, 0x00, 0x00];
@@ -648,5 +767,53 @@ mod tests {
 
         let written = conn.codec.into_inner().written().to_vec();
         assert_eq!(written[0], 0x81);
+    }
+
+    #[tokio::test]
+    async fn test_recv_allows_rsv1_when_extension_negotiated() {
+        // FIN=1 RSV1=1 OPCODE=Text, MASK=1 LEN=5, zero mask, payload "Hello"
+        let data = vec![
+            0xC1, 0x85, 0x00, 0x00, 0x00, 0x00, 0x48, 0x65, 0x6c, 0x6c, 0x6f,
+        ];
+        let stream = MockStream::new(data);
+
+        let mut registry = ExtensionRegistry::new();
+        registry.add(Box::new(Rsv1TestExtension)).unwrap();
+        registry
+            .configure(&[ExtensionOffer::new("x-rsv1-test")])
+            .unwrap();
+
+        let mut conn =
+            Connection::with_extensions(stream, Role::Server, Config::server(), registry);
+
+        let msg = conn.recv().await.unwrap().unwrap();
+        assert!(matches!(msg, Message::Text(ref s) if s == "Hello"));
+    }
+
+    #[tokio::test]
+    async fn test_recv_decodes_negotiated_rsv2_extension() {
+        // FIN=1 RSV2=1 OPCODE=Text, MASK=1 LEN=5, zero mask, payload "Hello"
+        let data = vec![
+            0xA1, 0x85, 0x00, 0x00, 0x00, 0x00, 0x48, 0x65, 0x6c, 0x6c, 0x6f,
+        ];
+        let stream = MockStream::new(data);
+
+        let decoded = Arc::new(AtomicBool::new(false));
+        let mut registry = ExtensionRegistry::new();
+        registry
+            .add(Box::new(Rsv2DecodeTrackingExtension {
+                decoded: decoded.clone(),
+            }))
+            .unwrap();
+        registry
+            .configure(&[ExtensionOffer::new("x-rsv2-test")])
+            .unwrap();
+
+        let mut conn =
+            Connection::with_extensions(stream, Role::Server, Config::server(), registry);
+
+        let msg = conn.recv().await.unwrap().unwrap();
+        assert!(matches!(msg, Message::Text(ref s) if s == "Hello"));
+        assert!(decoded.load(Ordering::SeqCst));
     }
 }

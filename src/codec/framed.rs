@@ -1,28 +1,13 @@
-use bytes::{Buf, BufMut, BytesMut};
+use bytes::{BufMut, BytesMut};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 use crate::config::Config;
 use crate::connection::Role;
 use crate::error::{Error, Result};
 use crate::protocol::Frame;
+use crate::protocol::OpCode;
+use crate::protocol::mask::apply_mask_simd;
 use crate::protocol::validation::FrameValidator;
-
-/// Generate a random seed for mask generation.
-///
-/// # Panics
-///
-/// Panics if the system's random number generator is unavailable.
-/// This is a critical security requirement - WebSocket masking MUST use
-/// cryptographically secure random values to prevent cache poisoning attacks.
-fn random_mask_seed() -> u32 {
-    let mut buf = [0u8; 4];
-    getrandom::getrandom(&mut buf).expect(
-        "Failed to obtain random bytes for WebSocket mask. \
-         This is a critical security requirement. \
-         Ensure your system has a working random number generator.",
-    );
-    u32::from_le_bytes(buf)
-}
 
 /// WebSocket frame encoder/decoder over an async I/O stream.
 ///
@@ -34,7 +19,6 @@ pub struct WebSocketCodec<T> {
     write_buf: BytesMut,
     role: Role,
     config: Config,
-    mask_counter: u32,
     validator: FrameValidator,
 }
 
@@ -50,7 +34,6 @@ impl<T> WebSocketCodec<T> {
             write_buf: BytesMut::with_capacity(config.write_buffer_size),
             role,
             config,
-            mask_counter: random_mask_seed(),
             validator,
         }
     }
@@ -67,13 +50,15 @@ impl<T> WebSocketCodec<T> {
         &self.config
     }
 
-    fn generate_mask(&mut self) -> [u8; 4] {
-        self.mask_counter = self.mask_counter.wrapping_add(0x9E37_79B9);
-        let a = self.mask_counter;
-        let b = a.wrapping_mul(0x85EB_CA6B);
-        let c = b ^ (b >> 13);
-        let d = c.wrapping_mul(0xC2B2_AE35);
-        d.to_le_bytes()
+    fn generate_mask(&mut self) -> Result<[u8; 4]> {
+        let mut mask = [0u8; 4];
+        getrandom::getrandom(&mut mask)
+            .map_err(|e| Error::Io(format!("Failed to generate WebSocket mask: {e}")))?;
+        Ok(mask)
+    }
+
+    pub fn set_allowed_rsv_bits(&mut self, bits: u8) {
+        self.validator.set_allowed_rsv_bits(bits);
     }
 }
 
@@ -84,18 +69,21 @@ impl<T: AsyncRead + AsyncWrite + Unpin> WebSocketCodec<T> {
                 // Validate frame before parsing (extract metadata from raw buffer)
                 let byte0 = self.read_buf[0];
                 let byte1 = self.read_buf[1];
+                let fin = (byte0 & 0x80) != 0;
+                let opcode = OpCode::from_u8(byte0 & 0x0F)?;
                 let rsv1 = (byte0 & 0x40) != 0;
                 let rsv2 = (byte0 & 0x20) != 0;
                 let rsv3 = (byte0 & 0x10) != 0;
                 let masked = (byte1 & 0x80) != 0;
                 let payload_len_initial = byte1 & 0x7F;
 
-                // Calculate payload length for validation
-                let payload_len = match payload_len_initial {
-                    0..=125 => Some(payload_len_initial as usize),
-                    126 if self.read_buf.len() >= 4 => {
-                        Some(u16::from_be_bytes([self.read_buf[2], self.read_buf[3]]) as usize)
-                    }
+                // Calculate payload length and base header length from the wire prefix.
+                let payload_and_header = match payload_len_initial {
+                    0..=125 => Some((payload_len_initial as usize, 2usize)),
+                    126 if self.read_buf.len() >= 4 => Some((
+                        u16::from_be_bytes([self.read_buf[2], self.read_buf[3]]) as usize,
+                        4usize,
+                    )),
                     127 if self.read_buf.len() >= 10 => {
                         let len_u64 = u64::from_be_bytes([
                             self.read_buf[2],
@@ -107,25 +95,59 @@ impl<T: AsyncRead + AsyncWrite + Unpin> WebSocketCodec<T> {
                             self.read_buf[8],
                             self.read_buf[9],
                         ]);
-                        // Use try_from to safely convert u64 to usize, avoiding silent truncation on 32-bit platforms
-                        usize::try_from(len_u64).ok()
+                        let len = usize::try_from(len_u64).map_err(|_| {
+                            Error::PayloadTooLargeForPlatform {
+                                size: len_u64,
+                                max: usize::MAX as u64,
+                            }
+                        })?;
+                        Some((len, 10usize))
                     }
                     _ => None,
                 };
 
-                // Validate if we have enough bytes to determine payload length
-                if let Some(len) = payload_len {
+                if let Some((payload_len, base_header_len)) = payload_and_header {
                     self.validator
-                        .validate_incoming(masked, rsv1, rsv2, rsv3, len)?;
-                }
+                        .validate_incoming(masked, rsv1, rsv2, rsv3, payload_len)?;
 
-                match Frame::parse(&self.read_buf) {
-                    Ok((frame, consumed)) => {
-                        self.read_buf.advance(consumed);
-                        return Ok(frame);
+                    let header_len = base_header_len + if masked { 4 } else { 0 };
+                    if self.read_buf.len() >= header_len {
+                        let total_size = header_len.checked_add(payload_len).ok_or(
+                            Error::PayloadTooLargeForPlatform {
+                                size: payload_len as u64,
+                                max: usize::MAX as u64,
+                            },
+                        )?;
+
+                        if self.read_buf.len() >= total_size {
+                            let frame_bytes = self.read_buf.split_to(total_size).freeze();
+                            let payload_start = header_len;
+                            let payload_end = payload_start + payload_len;
+
+                            let mut frame = if masked {
+                                let mask_offset = base_header_len;
+                                let mask = [
+                                    frame_bytes[mask_offset],
+                                    frame_bytes[mask_offset + 1],
+                                    frame_bytes[mask_offset + 2],
+                                    frame_bytes[mask_offset + 3],
+                                ];
+                                let mut payload = frame_bytes[payload_start..payload_end].to_vec();
+                                apply_mask_simd(&mut payload, mask);
+                                Frame::new(fin, opcode, payload)
+                            } else {
+                                Frame::new_from_bytes(
+                                    fin,
+                                    opcode,
+                                    frame_bytes.slice(payload_start..payload_end),
+                                )
+                            };
+                            frame.rsv1 = rsv1;
+                            frame.rsv2 = rsv2;
+                            frame.rsv3 = rsv3;
+                            return Ok(frame);
+                        }
                     }
-                    Err(Error::IncompleteFrame { .. }) => {}
-                    Err(e) => return Err(e),
                 }
             }
 
@@ -172,7 +194,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> WebSocketCodec<T> {
         self.config.limits.check_frame_size(payload_size)?;
 
         let mask = if self.role.must_mask() {
-            Some(self.generate_mask())
+            Some(self.generate_mask()?)
         } else {
             None
         };
@@ -322,6 +344,21 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_read_unmasked_frame_uses_zero_copy_payload() {
+        // Client receives unmasked frame from server: "Hello"
+        let data = vec![0x81, 0x05, 0x48, 0x65, 0x6c, 0x6c, 0x6f];
+        let stream = MockStream::new(data);
+        let mut codec = WebSocketCodec::new(stream, Role::Client, Config::client());
+
+        let frame = codec.read_frame().await.unwrap();
+        assert_eq!(frame.payload(), b"Hello");
+        assert!(
+            frame.payload_is_shared(),
+            "unmasked incoming payload should stay shared for zero-copy path"
+        );
+    }
+
+    #[tokio::test]
     async fn test_read_incomplete_frame() {
         // Two masked frames from client:
         // Frame 1: Text "Hello" - mask [0x37, 0xfa, 0x21, 0x3d]
@@ -402,6 +439,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_invalid_opcode_rejected_without_waiting_full_frame() {
+        // FIN=1, opcode=0x3 (reserved), masked+126-length indicator.
+        // Even without extended length and payload bytes, opcode must be rejected immediately.
+        let data = vec![0x83, 0xFE];
+        let stream = MockStream::new(data);
+        let mut codec = WebSocketCodec::new(stream, Role::Server, Config::server());
+
+        let result = codec.read_frame().await;
+        assert!(matches!(result, Err(Error::ReservedOpcode(0x03))));
+    }
+
+    #[tokio::test]
+    async fn test_invalid_opcode_frame_is_not_consumed() {
+        // Frame 1: reserved opcode 0x3, masked len=1, payload "A"
+        // Frame 2: valid text frame "A"
+        let data = vec![
+            0x83, 0x81, 0x00, 0x00, 0x00, 0x00, 0x41, // invalid
+            0x81, 0x81, 0x00, 0x00, 0x00, 0x00, 0x41, // valid
+        ];
+        let stream = MockStream::new(data);
+        let mut codec = WebSocketCodec::new(stream, Role::Server, Config::server());
+
+        let result1 = codec.read_frame().await;
+        assert!(matches!(result1, Err(Error::ReservedOpcode(0x03))));
+
+        let result2 = codec.read_frame().await;
+        assert!(matches!(result2, Err(Error::ReservedOpcode(0x03))));
+    }
+
+    #[tokio::test]
     async fn test_mask_not_zero_initially() {
         // 创建多个 codec，验证掩码不全为零
         // 注意：理论上可能随机到 0，但概率极低
@@ -450,6 +517,59 @@ mod tests {
         assert!(
             masks.len() >= 2,
             "Different codecs should produce different masks"
+        );
+    }
+
+    fn mod_inverse_u32_odd(a: u32) -> u32 {
+        debug_assert_eq!(a & 1, 1, "a must be odd to have inverse mod 2^32");
+        let mut x = a;
+        for _ in 0..5 {
+            x = x.wrapping_mul(2u32.wrapping_sub(a.wrapping_mul(x)));
+        }
+        x
+    }
+
+    fn unxorshift_right_u32(mut v: u32, shift: u32) -> u32 {
+        let mut s = shift;
+        while s < 32 {
+            v ^= v >> s;
+            s <<= 1;
+        }
+        v
+    }
+
+    fn predict_next_mask_from_mask(mask: [u8; 4]) -> [u8; 4] {
+        const C: u32 = 0x9E37_79B9;
+        const A: u32 = 0x85EB_CA6B;
+        const B: u32 = 0xC2B2_AE35;
+
+        let out1 = u32::from_le_bytes(mask);
+        let b_inv = mod_inverse_u32_odd(B);
+        let a_inv = mod_inverse_u32_odd(A);
+
+        let c1 = out1.wrapping_mul(b_inv);
+        let b1 = unxorshift_right_u32(c1, 13);
+        let state1 = b1.wrapping_mul(a_inv);
+        let state2 = state1.wrapping_add(C);
+
+        let b2 = state2.wrapping_mul(A);
+        let c2 = b2 ^ (b2 >> 13);
+        let out2 = c2.wrapping_mul(B);
+        out2.to_le_bytes()
+    }
+
+    #[test]
+    fn test_mask_not_predictable_from_previous_mask() {
+        let stream = MockStream::new(vec![]);
+        let mut codec = WebSocketCodec::new(stream, Role::Client, Config::client());
+
+        let mask1 = codec.generate_mask().unwrap();
+        let mask2 = codec.generate_mask().unwrap();
+        let predicted = predict_next_mask_from_mask(mask1);
+
+        assert_ne!(
+            mask2, predicted,
+            "Mask keys should be independently random, not derivable from previous key"
         );
     }
 }

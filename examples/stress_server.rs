@@ -236,14 +236,14 @@ async fn handle_connection_inner(
     }
 
     let request = HandshakeRequest::parse(&request_bytes)?;
-    request.validate()?;
+    let config = Config::server();
+    request.validate_with_config(&config)?;
 
     let response = HandshakeResponse::from_request(&request);
     let mut response_bytes = Vec::new();
     let _ = response.write(&mut response_bytes);
     stream.write_all(&response_bytes).await?;
 
-    let config = Config::server();
     let mut conn = Connection::new(stream, Role::Server, config);
 
     while conn.is_open() {

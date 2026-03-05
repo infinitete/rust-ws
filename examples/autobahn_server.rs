@@ -65,14 +65,14 @@ async fn handle_connection(mut stream: TcpStream) -> Result<(), Box<dyn Error + 
     }
 
     let request = HandshakeRequest::parse(&request_bytes)?;
-    request.validate()?;
+    let mut config = Config::server();
+    request.validate_with_config(&config)?;
 
     let response = HandshakeResponse::from_request(&request);
     let mut response_bytes = Vec::new();
     let _ = response.write(&mut response_bytes);
     stream.write_all(&response_bytes).await?;
 
-    let mut config = Config::server();
     config.limits.max_message_size = 64 * 1024 * 1024;
     config.limits.max_frame_size = 64 * 1024 * 1024;
 

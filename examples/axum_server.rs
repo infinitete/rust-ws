@@ -11,11 +11,11 @@
 //!
 //! Or open http://127.0.0.1:9001 in a browser to use the built-in test page.
 
+use axum::Router;
 use axum::extract::Request;
 use axum::http::{StatusCode, header};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::get;
-use axum::Router;
 use hyper_util::rt::TokioIo;
 use rsws::{CloseCode, Config, Connection, Message, Role, compute_accept_key};
 use std::error::Error;
@@ -114,7 +114,10 @@ async fn ws_handler(mut req: Request) -> Response {
         return (StatusCode::BAD_REQUEST, "Missing Connection: Upgrade").into_response();
     }
 
-    let sec_key = match headers.get("sec-websocket-key").and_then(|v| v.to_str().ok()) {
+    let sec_key = match headers
+        .get("sec-websocket-key")
+        .and_then(|v| v.to_str().ok())
+    {
         Some(key) => key.to_owned(),
         None => {
             return (StatusCode::BAD_REQUEST, "Missing Sec-WebSocket-Key").into_response();

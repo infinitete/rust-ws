@@ -396,6 +396,24 @@ impl ExtensionRegistry {
         self.negotiated.len()
     }
 
+    /// Return combined RSV bitmask used by negotiated extensions.
+    pub fn negotiated_rsv_mask(&self) -> u8 {
+        let mut mask = 0u8;
+        for &idx in &self.negotiated {
+            let bits = self.extensions[idx].rsv_bits();
+            if bits.rsv1 {
+                mask |= 0x40;
+            }
+            if bits.rsv2 {
+                mask |= 0x20;
+            }
+            if bits.rsv3 {
+                mask |= 0x10;
+            }
+        }
+        mask
+    }
+
     /// Generate the Sec-WebSocket-Extensions header value for client handshake.
     ///
     /// Returns a comma-separated list of extension offers.
@@ -438,6 +456,9 @@ impl ExtensionRegistry {
                 .enumerate()
                 .find(|(_, e)| e.name() == offer.name)
             {
+                if self.negotiated.contains(&idx) {
+                    continue;
+                }
                 // Try to negotiate
                 if let Ok(response_params) = ext.negotiate(&offer.params) {
                     // Configure with final params
@@ -475,6 +496,9 @@ impl ExtensionRegistry {
                 .enumerate()
                 .find(|(_, e)| e.name() == response.name)
             {
+                if self.negotiated.contains(&idx) {
+                    continue;
+                }
                 ext.configure(&response.params)?;
                 self.negotiated.push(idx);
             }
@@ -867,6 +891,18 @@ mod tests {
     }
 
     #[test]
+    fn test_registry_negotiate_deduplicates_same_extension() {
+        let mut registry = ExtensionRegistry::new();
+        registry.add(Box::new(NoOpExtension::new("ext1"))).unwrap();
+
+        let offers = vec![ExtensionOffer::new("ext1"), ExtensionOffer::new("ext1")];
+        let accepted = registry.negotiate(&offers);
+
+        assert_eq!(accepted.len(), 1);
+        assert_eq!(registry.negotiated_count(), 1);
+    }
+
+    #[test]
     fn test_registry_negotiate_unknown_extension() {
         let mut registry = ExtensionRegistry::new();
         registry.add(Box::new(NoOpExtension::new("known"))).unwrap();
@@ -902,6 +938,17 @@ mod tests {
         registry.add(Box::new(NoOpExtension::new("ext1"))).unwrap();
 
         let responses = vec![ExtensionOffer::new("ext1")];
+        registry.configure(&responses).unwrap();
+
+        assert_eq!(registry.negotiated_count(), 1);
+    }
+
+    #[test]
+    fn test_registry_configure_deduplicates_same_extension() {
+        let mut registry = ExtensionRegistry::new();
+        registry.add(Box::new(NoOpExtension::new("ext1"))).unwrap();
+
+        let responses = vec![ExtensionOffer::new("ext1"), ExtensionOffer::new("ext1")];
         registry.configure(&responses).unwrap();
 
         assert_eq!(registry.negotiated_count(), 1);

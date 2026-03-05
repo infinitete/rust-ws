@@ -175,7 +175,7 @@ impl HandshakeRequest {
             )));
         }
 
-        if !parts[2].starts_with("HTTP/1.1") {
+        if parts[2] != "HTTP/1.1" {
             return Err(Error::InvalidHandshake(format!(
                 "Expected HTTP/1.1, got {}",
                 parts[2]
@@ -307,6 +307,25 @@ impl HandshakeRequest {
         Ok(())
     }
 
+    /// Validate the handshake request against protocol rules and runtime config.
+    ///
+    /// This performs `Self::validate()` and additionally enforces
+    /// `config.allowed_origins` when configured.
+    ///
+    /// # Errors
+    ///
+    /// - Any error from [`Self::validate`]
+    /// - [`Error::OriginNotAllowed`] if origin policy rejects the request
+    pub fn validate_with_config(&self, config: &crate::config::Config) -> Result<()> {
+        self.validate()?;
+
+        if let Some(allowed) = config.allowed_origins.as_ref() {
+            validate_origin(self.origin.as_deref(), allowed)?;
+        }
+
+        Ok(())
+    }
+
     /// Parse a handshake request with size limit.
     ///
     /// # Errors
@@ -350,6 +369,7 @@ impl HandshakeResponse {
     /// # Errors
     /// Returns `Error::InvalidHeaderValue` if protocol or extensions contain CR/LF.
     pub fn write(&self, buf: &mut Vec<u8>) -> Result<()> {
+        validate_header_value("Sec-WebSocket-Accept", &self.accept)?;
         buf.extend_from_slice(b"HTTP/1.1 101 Switching Protocols\r\n");
         buf.extend_from_slice(b"Upgrade: websocket\r\n");
         buf.extend_from_slice(b"Connection: Upgrade\r\n");
@@ -391,7 +411,11 @@ impl HandshakeResponse {
             .next()
             .ok_or_else(|| Error::InvalidHandshake("Empty response".into()))?;
 
-        if !status_line.starts_with("HTTP/1.1 101") {
+        let mut status_parts = status_line.split_whitespace();
+        let http_version = status_parts.next().unwrap_or_default();
+        let status_code = status_parts.next().unwrap_or_default();
+
+        if http_version != "HTTP/1.1" || status_code != "101" {
             return Err(Error::InvalidHandshake(format!(
                 "Expected 101 status, got: {}",
                 status_line
@@ -448,6 +472,7 @@ impl HandshakeResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::Config;
 
     // Test 1: RFC 6455 example verification
     #[test]
@@ -677,6 +702,23 @@ mod tests {
     }
 
     #[test]
+    fn test_validate_with_config_rejects_disallowed_origin() {
+        let req = HandshakeRequest {
+            path: "/".to_string(),
+            host: "example.com".to_string(),
+            key: "dGhlIHNhbXBsZSBub25jZQ==".to_string(),
+            version: 13,
+            origin: Some("https://evil.com".to_string()),
+            protocols: vec![],
+            extensions: vec![],
+        };
+        let config = Config::server().with_allowed_origins(vec!["https://example.com".to_string()]);
+
+        let result = req.validate_with_config(&config);
+        assert!(matches!(result, Err(Error::OriginNotAllowed { .. })));
+    }
+
+    #[test]
     fn test_case_insensitive_headers() {
         let request = b"GET /chat HTTP/1.1\r\n\
             HOST: server.example.com\r\n\
@@ -757,6 +799,20 @@ Sec-WebSocket-Version: 13\r\n\r\n";
         assert!(matches!(err, Error::InvalidHandshake(msg) if msg.contains("HTTP/1.1")));
     }
 
+    #[test]
+    fn test_invalid_http_version_with_suffix_rejected() {
+        let request = b"GET /chat HTTP/1.1x\r\n\
+            Host: server.example.com\r\n\
+            Upgrade: websocket\r\n\
+            Connection: Upgrade\r\n\
+            Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\
+            Sec-WebSocket-Version: 13\r\n\
+            \r\n";
+
+        let result = HandshakeRequest::parse(request);
+        assert!(result.is_err());
+    }
+
     // Test 14: Missing Host header
     #[test]
     fn test_missing_host_header() {
@@ -787,6 +843,30 @@ Sec-WebSocket-Version: 13\r\n\r\n";
         assert!(
             matches!(err, Error::InvalidHandshake(msg) if msg.contains("Sec-WebSocket-Accept"))
         );
+    }
+
+    #[test]
+    fn test_response_status_1010_rejected() {
+        let response = b"HTTP/1.1 1010 Not Switching Protocols\r\n\
+            Upgrade: websocket\r\n\
+            Connection: Upgrade\r\n\
+            Sec-WebSocket-Accept: test\r\n\
+            \r\n";
+
+        let result = HandshakeResponse::parse(response);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_crlf_in_accept_rejected() {
+        let response = HandshakeResponse {
+            accept: "ok\r\nX-Injected: evil".to_string(),
+            protocol: None,
+            extensions: vec![],
+        };
+        let mut buf = Vec::new();
+        let result = response.write(&mut buf);
+        assert!(matches!(result, Err(Error::InvalidHeaderValue { .. })));
     }
 
     #[test]

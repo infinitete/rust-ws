@@ -28,7 +28,8 @@ pub async fn handle_connection(
     }
 
     let request = HandshakeRequest::parse(&request_bytes)?;
-    request.validate()?;
+    let config = Config::server();
+    request.validate_with_config(&config)?;
 
     let response = HandshakeResponse::from_request(&request);
     let mut response_bytes = Vec::new();
@@ -37,7 +38,6 @@ pub async fn handle_connection(
 
     println!("  [{}] Handshake complete", addr);
 
-    let config = Config::server();
     let mut conn = Connection::new(stream, Role::Server, config);
 
     let mut username: Option<String> = None;
